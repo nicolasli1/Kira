@@ -1,0 +1,87 @@
+name: ci-cd
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r app/requirements.txt
+
+      - name: Run unit tests
+        run: pytest app/tests -q
+
+      - name: Create network
+        run: docker network create payments-network || true
+
+      - name: Build blockchain image
+        run: docker build -t payments-blockchain:ci -f Dockerfile.blockchain .
+
+      - name: Build API image
+        run: docker build -t payments-api:ci -f Dockerfile .
+
+      - name: Start blockchain container
+        run: |
+          docker run -d --rm --name payments-blockchain \
+            --network payments-network \
+            -p 8001:8001 \
+            payments-blockchain:ci
+
+      - name: Start API container
+        run: |
+          docker run -d --rm --name payments-api \
+            --network payments-network \
+            -p 8000:8000 \
+            -e BLOCKCHAIN_SERVICE_URL=http://payments-blockchain:8001 \
+            -e VENDOR_SHARED_SECRET=mocked-secret \
+            payments-api:ci
+
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8000/health && exit 0
+            sleep 2
+          done
+          exit 1
+
+      - name: Run deployment tests
+        run: chmod +x scripts/post_deploy_test.sh && ./scripts/post_deploy_test.sh
+
+      - name: Collect DORA metrics artifact
+        env:
+          LEAD_TIME_SECONDS: "derived-in-report"
+        run: python scripts/collect_dora_metrics.py
+
+      - name: Upload DORA metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: dora-metrics
+          path: dora-metrics.json
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          docker logs payments-api || true
+          docker logs payments-blockchain || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker rm -f payments-api || true
+          docker rm -f payments-blockchain || true
+          docker network rm payments-network || true

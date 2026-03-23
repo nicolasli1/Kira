@@ -69,7 +69,7 @@ resource "docker_container" "api" {
   }
 
   networks_advanced {
-    name = docker_network.payments.name
+    name    = docker_network.payments.name
     aliases = ["payments-api"]
   }
 
